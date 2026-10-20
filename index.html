@@ -231,19 +231,50 @@
   </footer>
 
   <script>
-    // Front-end only: intentionally does not create orders, claim payment, or release files.
-    // Connect this button to a server-side checkout endpoint before accepting real payments.
+    // Test-mode checkout connection. This creates a PayMongo checkout session;
+    // it does NOT implement secure PDF delivery or prove payment by itself.
+    const API_BASE_URL = 'https://cse-ready-paymongo-api.onrender.com';
     document.getElementById('year').textContent = new Date().getFullYear();
-    document.getElementById('startPayment').addEventListener('click', function () {
+
+    document.getElementById('startPayment').addEventListener('click', async function () {
       const email = document.getElementById('buyerEmail');
       const error = document.getElementById('emailError');
+      const button = document.getElementById('startPayment');
       error.textContent = '';
+
       if (!email.checkValidity() || !email.value.trim()) {
         error.textContent = 'Enter a valid email address to continue.';
         email.focus();
         return;
       }
-      error.textContent = 'Payment checkout is not connected yet. Configure the backend and official QR Ph code before launch.';
+
+      button.disabled = true;
+      button.style.opacity = '0.7';
+      button.textContent = 'Connecting to secure checkout…';
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/create-checkout-session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.value.trim() })
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || data.message || `Checkout request failed (${response.status}).`);
+        }
+
+        if (!data.checkoutUrl || !data.checkoutUrl.startsWith('https://checkout.paymongo.com/')) {
+          throw new Error('The backend did not return a valid PayMongo checkout URL. Check the Render logs.');
+        }
+
+        window.location.assign(data.checkoutUrl);
+      } catch (err) {
+        error.textContent = `${err.message || 'Could not connect to checkout.'} If this continues, check the backend logs in Render.`;
+        button.disabled = false;
+        button.style.opacity = '';
+        button.textContent = 'Continue to payment instructions';
+      }
     });
   </script>
 </body>
