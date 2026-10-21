@@ -1,4 +1,3 @@
-
 const express = require("express");
 const crypto = require("crypto");
 
@@ -11,12 +10,15 @@ const SITE_URL = process.env.SITE_URL;
 const PRODUCT_PRICE = Number(process.env.PRODUCT_PRICE || 14900);
 const CURRENCY = (process.env.CURRENCY || "PHP").toUpperCase();
 
-const ALLOWED_ORIGIN =
-  "https://cse-ready-ebook-store.onrender.com";
+const ALLOWED_ORIGIN = "https://cse-ready-ebook-store.onrender.com";
 
 // Basic configuration checks
 if (!SECRET_KEY) {
   console.warn("Missing PAYMONGO_SECRET_KEY");
+}
+
+if (!WEBHOOK_SECRET) {
+  console.warn("Missing PAYMONGO_WEBHOOK_SECRET");
 }
 
 if (!SITE_URL) {
@@ -30,6 +32,14 @@ if (!Number.isSafeInteger(PRODUCT_PRICE) || PRODUCT_PRICE <= 0) {
 if (CURRENCY !== "PHP") {
   throw new Error("This store is configured for PHP only.");
 }
+
+// Request logger: shows every incoming request in Render Logs.
+app.use((req, _res, next) => {
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`
+  );
+  next();
+});
 
 // CORS: allow requests from the ebook landing page only.
 app.use((req, res, next) => {
@@ -165,6 +175,11 @@ app.post(
         });
       }
 
+      console.log("Checkout session created:", {
+        checkoutSessionId: result.data.id,
+        referenceNumber
+      });
+
       // Email is accepted here for input validation.
       // This starter does not yet persist an order or deliver files.
       return res.status(201).json({
@@ -182,15 +197,22 @@ app.post(
   }
 );
 
-// IMPORTANT: Register the webhook route before express.json().
+// IMPORTANT: Register the webhook route before the global express.json().
 // Signature verification requires the original, unmodified request body.
 app.post(
   "/webhooks/paymongo",
   express.raw({ type: "application/json", limit: "1mb" }),
   (req, res) => {
+    console.log("WEBHOOK HIT", {
+      time: new Date().toISOString(),
+      contentType: req.get("Content-Type"),
+      signatureHeaderPresent: !!req.get("Paymongo-Signature"),
+      bodyIsBuffer: Buffer.isBuffer(req.body)
+    });
+
     try {
       if (!WEBHOOK_SECRET) {
-        console.error("Missing PAYMONGO_WEBHOOK_SECRET");
+        console.error("WEBHOOK REJECT: Missing PAYMONGO_WEBHOOK_SECRET");
 
         return res.status(503).json({
           error: "Webhook is not configured."
@@ -198,13 +220,16 @@ app.post(
       }
 
       if (!Buffer.isBuffer(req.body)) {
+        console.error(
+          "WEBHOOK REJECT: body is not a raw buffer (check Content-Type)"
+        );
+
         return res.status(400).json({
           error: "Expected a raw JSON request body."
         });
       }
 
-      const signatureHeader =
-        req.get("Paymongo-Signature") || "";
+      const signatureHeader = req.get("Paymongo-Signature") || "";
 
       const signatureParts = {};
 
@@ -221,8 +246,13 @@ app.post(
       const timestamp = signatureParts.t;
       const receivedSignature = signatureParts.te;
 
-      // This endpoint is configured for Test Mode.
+      // This endpoint is configured for Test Mode (te = test signature).
       if (!timestamp || !receivedSignature) {
+        console.error(
+          "WEBHOOK REJECT: missing t or te in signature header. Keys found:",
+          Object.keys(signatureParts)
+        );
+
         return res.status(400).json({
           error: "Missing Test Mode webhook signature."
         });
@@ -236,13 +266,17 @@ app.post(
         !Number.isFinite(timestampNumber) ||
         Math.abs(nowSeconds - timestampNumber) > 300
       ) {
+        console.error("WEBHOOK REJECT: timestamp invalid or too old", {
+          timestamp,
+          nowSeconds
+        });
+
         return res.status(400).json({
           error: "Webhook timestamp is invalid or too old."
         });
       }
 
-      const signedPayload =
-        `${timestamp}.${req.body.toString("utf8")}`;
+      const signedPayload = `${timestamp}.${req.body.toString("utf8")}`;
 
       const expectedSignature = crypto
         .createHmac("sha256", WEBHOOK_SECRET)
@@ -253,6 +287,8 @@ app.post(
         !/^[a-f0-9]+$/i.test(receivedSignature) ||
         receivedSignature.length !== expectedSignature.length
       ) {
+        console.error("WEBHOOK REJECT: signature format/length invalid");
+
         return res.status(400).json({
           error: "Invalid webhook signature."
         });
@@ -264,6 +300,10 @@ app.post(
       );
 
       if (!signatureMatches) {
+        console.error(
+          "WEBHOOK REJECT: signature mismatch (check PAYMONGO_WEBHOOK_SECRET matches this webhook's whsk_ secret)"
+        );
+
         return res.status(400).json({
           error: "Webhook signature verification failed."
         });
@@ -275,7 +315,7 @@ app.post(
 
       // Confirm that the webhook belongs to Test Mode.
       if (event?.data?.attributes?.livemode === true) {
-        console.error("Live-mode event received by Test Mode endpoint.");
+        console.error("WEBHOOK REJECT: live-mode event on Test Mode endpoint");
 
         return res.status(400).json({
           error: "Unexpected live-mode webhook."
@@ -299,6 +339,8 @@ app.post(
         console.log(
           "Payment event verified. Ebook delivery is not implemented yet."
         );
+      } else {
+        console.log("Verified event ignored (not handled):", eventType);
       }
 
       // Acknowledge the verified webhook.
@@ -306,7 +348,7 @@ app.post(
         received: true
       });
     } catch (error) {
-      console.error("Webhook processing error:", error.message);
+      console.error("WEBHOOK ERROR:", error.message);
 
       return res.status(400).json({
         error: "Invalid webhook request."
@@ -315,7 +357,7 @@ app.post(
   }
 );
 
-// Parse JSON for regular API routes.
+// Parse JSON for any other API routes.
 // Keep the raw-body webhook route above this middleware.
 app.use(express.json({ limit: "10kb" }));
 
